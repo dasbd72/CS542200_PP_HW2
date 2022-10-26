@@ -2,9 +2,9 @@
 #define _GNU_SOURCE
 #endif
 #define PNG_NO_SETJMP
-#include <sched.h>
 #include <assert.h>
 #include <png.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
