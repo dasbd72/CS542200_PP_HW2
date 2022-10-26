@@ -1,13 +1,24 @@
+// #define DEBUG
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 #define PNG_NO_SETJMP
 #include <assert.h>
 #include <png.h>
+#include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef DEBUG
+#define DEBUG_PRINT(fmt, args...)     \
+    do {                              \
+        fprintf(stderr, fmt, ##args); \
+    } while (false);
+#else
+#define DEBUG_PRINT(fmt, args...)
+#endif
 
 void write_png(const char* filename, int iters, int width, int height, const int* buffer) {
     FILE* fp = fopen(filename, "wb");
@@ -50,7 +61,7 @@ int main(int argc, char** argv) {
     /* detect how many CPUs are available */
     cpu_set_t cpu_set;
     sched_getaffinity(0, sizeof(cpu_set), &cpu_set);
-    printf("%d cpus available\n", CPU_COUNT(&cpu_set));
+    DEBUG_PRINT("%d cpus available\n", CPU_COUNT(&cpu_set));
 
     /* argument parsing */
     assert(argc == 9);
