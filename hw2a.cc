@@ -12,13 +12,15 @@
  * 2: By column
  * 3: By block
  */
-#define PARTITION 1
+#define PARTITION 0
+#define VECTORIZATION
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 #define PNG_NO_SETJMP
 #include <assert.h>
+#include <immintrin.h>
 #include <math.h>
 #include <png.h>
 #include <pthread.h>
@@ -148,7 +150,7 @@ int main(int argc, char** argv) {
     taskPool.chunk = ceil((double)(width * height) / ncpus);
 #elif SCHEDULE == 1
     // taskPool.chunk = ceil((double)(width * height) / 10000);
-    taskPool.chunk = 1000;
+    taskPool.chunk = 3 * width;
 #endif  // SCHEDULE
 #elif PARTITION == 1
     taskPool.taskId = 0;
@@ -228,6 +230,52 @@ void* func(Data* data) {
         Task task = get_task(data);
         if (task.start >= height * width)
             break;
+#ifdef VECTORIZATION
+        int id;
+        for (id = task.start; id + 1 < task.end && id + 1 < height * width; id += 2) {
+            __m128d vec_y0 = _mm_add_pd(_mm_mul_pd(_mm_set_pd((id + 1) / width, id / width), _mm_set1_pd((upper - lower) / height)), _mm_set1_pd(lower));
+            __m128d vec_x0 = _mm_add_pd(_mm_mul_pd(_mm_set_pd((id + 1) % width, id % width), _mm_set1_pd((right - left) / width)), _mm_set1_pd(left));
+            int repeats = 0;
+            __m128i vec_repeat = _mm_setzero_si128();
+            __m128d vec_x = _mm_setzero_pd();
+            __m128d vec_y = _mm_setzero_pd();
+            __m128d vec_length_squared = _mm_setzero_pd();
+            __m128d vec_length_squared_threshold = _mm_set1_pd(4);
+            while (repeats < iters) {
+                __m128d vec_cmp = _mm_cmpgt_pd(vec_length_squared_threshold, vec_length_squared);
+                if (_mm_movemask_pd(vec_cmp) == 0)
+                    break;
+                __m128d vec_temp = _mm_add_pd(_mm_sub_pd(_mm_mul_pd(vec_x, vec_x), _mm_mul_pd(vec_y, vec_y)), vec_x0);
+                vec_y = _mm_add_pd(_mm_mul_pd(_mm_mul_pd(_mm_set1_pd(2), vec_x), vec_y), vec_y0);
+                vec_x = vec_temp;
+                vec_length_squared = _mm_blendv_pd(vec_length_squared, _mm_add_pd(_mm_mul_pd(vec_x, vec_x), _mm_mul_pd(vec_y, vec_y)), vec_cmp);
+                vec_repeat = _mm_add_epi64(vec_repeat, _mm_srli_epi64(_mm_castpd_si128(vec_cmp), 63));
+                ++repeats;
+            }
+            long long repeat_arr[2];
+            _mm_store_si128((__m128i*)repeat_arr, vec_repeat);
+            image[id] = repeat_arr[0];
+            image[id + 1] = repeat_arr[1];
+        }
+        if (id < task.end && id < height * width) {
+            int j = id / width;
+            int i = id % width;
+            double y0 = j * ((upper - lower) / height) + lower;
+            double x0 = i * ((right - left) / width) + left;
+            int repeats = 0;
+            double x = 0;
+            double y = 0;
+            double length_squared = 0;
+            while (repeats < iters && length_squared < 4) {
+                double temp = x * x - y * y + x0;
+                y = 2 * x * y + y0;
+                x = temp;
+                length_squared = x * x + y * y;
+                ++repeats;
+            }
+            image[id] = repeats;
+        }
+#else
         for (int id = task.start; id < task.end && id < height * width; id++) {
             int j = id / width;
             int i = id % width;
@@ -246,12 +294,58 @@ void* func(Data* data) {
             }
             image[j * width + i] = repeats;
         }
+#endif  // VECTORIZATION
     }
 #elif PARTITION == 1
     while (1) {
         Task task = get_task(data);
         if (task.start >= height)
             break;
+#ifdef VECTORIZATION
+        for (int j = task.start, i; j < task.end && j < height; j++) {
+            for (i = 0; i + 1 < width; i += 2) {
+                __m128d vec_y0 = _mm_set1_pd(j * ((upper - lower) / height) + lower);
+                __m128d vec_x0 = _mm_add_pd(_mm_mul_pd(_mm_set_pd(i + 1, i), _mm_set1_pd((right - left) / width)), _mm_set1_pd(left));
+                int repeats = 0;
+                __m128i vec_repeat = _mm_setzero_si128();
+                __m128d vec_x = _mm_setzero_pd();
+                __m128d vec_y = _mm_setzero_pd();
+                __m128d vec_length_squared = _mm_setzero_pd();
+                __m128d vec_length_squared_threshold = _mm_set1_pd(4);
+                while (repeats < iters) {
+                    __m128d vec_cmp = _mm_cmpgt_pd(vec_length_squared_threshold, vec_length_squared);
+                    if (_mm_movemask_pd(vec_cmp) == 0)
+                        break;
+                    __m128d vec_temp = _mm_add_pd(_mm_sub_pd(_mm_mul_pd(vec_x, vec_x), _mm_mul_pd(vec_y, vec_y)), vec_x0);
+                    vec_y = _mm_add_pd(_mm_mul_pd(_mm_mul_pd(_mm_set1_pd(2), vec_x), vec_y), vec_y0);
+                    vec_x = vec_temp;
+                    vec_length_squared = _mm_blendv_pd(vec_length_squared, _mm_add_pd(_mm_mul_pd(vec_x, vec_x), _mm_mul_pd(vec_y, vec_y)), vec_cmp);
+                    vec_repeat = _mm_add_epi64(vec_repeat, _mm_srli_epi64(_mm_castpd_si128(vec_cmp), 63));
+                    ++repeats;
+                }
+                long long repeat_arr[2];
+                _mm_store_si128((__m128i*)repeat_arr, vec_repeat);
+                image[j * width + i] = repeat_arr[0];
+                image[j * width + i + 1] = repeat_arr[1];
+            }
+            if (i < width) {
+                double y0 = j * ((upper - lower) / height) + lower;
+                double x0 = i * ((right - left) / width) + left;
+                int repeats = 0;
+                double x = 0;
+                double y = 0;
+                double length_squared = 0;
+                while (repeats < iters && length_squared < 4) {
+                    double temp = x * x - y * y + x0;
+                    y = 2 * x * y + y0;
+                    x = temp;
+                    length_squared = x * x + y * y;
+                    ++repeats;
+                }
+                image[j * width + i] = repeats;
+            }
+        }
+#else
         for (int j = task.start; j < task.end && j < height; j++) {
             for (int i = 0; i < width; i++) {
                 double y0 = j * ((upper - lower) / height) + lower;
@@ -270,6 +364,7 @@ void* func(Data* data) {
                 image[j * width + i] = repeats;
             }
         }
+#endif  // VECTORIZATION
     }
 #endif  // PARTITION
     return NULL;
