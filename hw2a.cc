@@ -1,11 +1,18 @@
 // #define DEBUG
 // #define TIMING
 /*
-0: static
-1: dynamic
-2: guided
+ * 0: static
+ * 1: dynamic
+ * 2: guided
  */
 #define SCHEDULE 1
+/**
+ * 0: By index
+ * 1: By row
+ * 2: By column
+ * 3: By block
+ */
+#define PARTITION 1
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -51,12 +58,22 @@ double __duration, __tot_duration;
 #endif
 
 typedef struct Task {
+#if PARTITION == 0
     int start;
     int end;
+#elif PARTITION == 1
+    int start;
+    int end;
+#endif  // PARTITION
 } Task;
 typedef struct TaskPool {
+#if PARTITION == 0
     int taskId;
     int chunk;
+#elif PARTITION == 1
+    int taskId;
+    int chunk;
+#endif  // PARTITION
     pthread_mutex_t mutex;
 } TaskPool;
 typedef struct SharedData {
@@ -125,13 +142,19 @@ int main(int argc, char** argv) {
     sharedData.image = image;
     sharedData.taskPool = &taskPool;
 
+#if PARTITION == 0
     taskPool.taskId = 0;
 #if SCHEDULE == 0
     taskPool.chunk = ceil((double)(width * height) / ncpus);
 #elif SCHEDULE == 1
     // taskPool.chunk = ceil((double)(width * height) / 10000);
     taskPool.chunk = 1000;
-#endif
+#endif  // SCHEDULE
+#elif PARTITION == 1
+    taskPool.taskId = 0;
+    taskPool.chunk = 1;
+#endif  // PARTITION
+
     pthread_mutex_init(&taskPool.mutex, NULL);
 
     for (size_t tid = 0; tid < ncpus; tid++) {
@@ -175,9 +198,15 @@ Task get_task(Data* data) {
 
     Task task;
     pthread_mutex_lock(&taskPool->mutex);
+#if PARTITION == 0
     task.start = taskPool->taskId;
     taskPool->taskId += taskPool->chunk;
     task.end = taskPool->taskId;
+#elif PARTITION == 1
+    task.start = taskPool->taskId;
+    taskPool->taskId += taskPool->chunk;
+    task.end = taskPool->taskId;
+#endif  // PARTITION
     pthread_mutex_unlock(&taskPool->mutex);
     return task;
 }
@@ -194,6 +223,7 @@ void* func(Data* data) {
     int height = sharedData->height;
     int* image = sharedData->image;
 
+#if PARTITION == 0
     while (1) {
         Task task = get_task(data);
         if (task.start >= height * width)
@@ -217,6 +247,31 @@ void* func(Data* data) {
             image[j * width + i] = repeats;
         }
     }
+#elif PARTITION == 1
+    while (1) {
+        Task task = get_task(data);
+        if (task.start >= height)
+            break;
+        for (int j = task.start; j < task.end && j < height; j++) {
+            for (int i = 0; i < width; i++) {
+                double y0 = j * ((upper - lower) / height) + lower;
+                double x0 = i * ((right - left) / width) + left;
+                int repeats = 0;
+                double x = 0;
+                double y = 0;
+                double length_squared = 0;
+                while (repeats < iters && length_squared < 4) {
+                    double temp = x * x - y * y + x0;
+                    y = 2 * x * y + y0;
+                    x = temp;
+                    length_squared = x * x + y * y;
+                    ++repeats;
+                }
+                image[j * width + i] = repeats;
+            }
+        }
+    }
+#endif  // PARTITION
     return NULL;
 }
 void* thread_func(void* arg) {
