@@ -57,9 +57,6 @@ typedef struct Task {
 typedef struct TaskPool {
     int taskId;
     int chunk;
-#if SCHEDULE == 2
-    int decrement;
-#endif
     pthread_mutex_t mutex;
 } TaskPool;
 typedef struct SharedData {
@@ -82,7 +79,7 @@ typedef struct Data {
 } Data;
 
 /* Gets taskid with locking */
-Task get_task(TaskPool* taskPool);
+Task get_task(Data* data);
 void* func(Data* data);
 void* thread_func(void* arg);
 
@@ -134,9 +131,6 @@ int main(int argc, char** argv) {
 #elif SCHEDULE == 1
     // taskPool.chunk = ceil((double)(width * height) / 10000);
     taskPool.chunk = 1000;
-#elif SCHEDULE == 2
-    taskPool.chunk = ceil((double)(width * height) / 1000);
-    taskPool.decrement = 100;
 #endif
     pthread_mutex_init(&taskPool.mutex, NULL);
 
@@ -174,25 +168,22 @@ int main(int argc, char** argv) {
     TOT_TIMING_END();
 }
 
-Task get_task(TaskPool* taskPool) {
+Task get_task(Data* data) {
+    LocalData* localData = data->localData;
+    SharedData* sharedData = data->sharedData;
+    TaskPool* taskPool = sharedData->taskPool;
+
     Task task;
     pthread_mutex_lock(&taskPool->mutex);
     task.start = taskPool->taskId;
     taskPool->taskId += taskPool->chunk;
     task.end = taskPool->taskId;
-#if SCHEDULE == 2
-    if (taskPool->chunk > taskPool->decrement)
-        taskPool->chunk -= taskPool->decrement;
-    else
-        taskPool->chunk = 1;
-#endif
     pthread_mutex_unlock(&taskPool->mutex);
     return task;
 }
 void* func(Data* data) {
     LocalData* localData = data->localData;
     SharedData* sharedData = data->sharedData;
-    TaskPool* taskPool = sharedData->taskPool;
 
     int iters = sharedData->iters;
     double left = sharedData->left;
@@ -204,7 +195,7 @@ void* func(Data* data) {
     int* image = sharedData->image;
 
     while (1) {
-        Task task = get_task(taskPool);
+        Task task = get_task(data);
         if (task.start >= height * width)
             break;
         for (int id = task.start; id < task.end && id < height * width; id++) {
