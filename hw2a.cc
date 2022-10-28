@@ -3,7 +3,6 @@
 /*
  * 0: static
  * 1: dynamic
- * 2: guided
  */
 #define SCHEDULE 1
 /**
@@ -12,7 +11,7 @@
  * 2: By column
  * 3: By block
  */
-#define PARTITION 1
+#define PARTITION 0
 #define VECTORIZATION
 // #undef VECTORIZATION
 
@@ -169,8 +168,7 @@ int main(int argc, char** argv) {
 #if SCHEDULE == 0
     taskPool.chunk = ceil((double)(width * height) / ncpus);
 #elif SCHEDULE == 1
-    // taskPool.chunk = ceil((double)(width * height) / 10000);
-    taskPool.chunk = 3 * width;
+    taskPool.chunk = 10 * width;
 #endif  // SCHEDULE
 #elif PARTITION == 1
     taskPool.taskId = 0;
@@ -192,13 +190,6 @@ int main(int argc, char** argv) {
         data[tid].sharedData = &sharedData;
         data[tid].localData = &localData[tid];
     }
-
-    /* Logging */
-    DEBUG_PRINT("Image size: %d\n", width * height);
-    DEBUG_PRINT("Chunk: %d\n", taskPool.chunk);
-#if SCHEUDLE == 2
-    DEBUG_PRINT("Decrement: %d\n", taskPool.decrement);
-#endif
 
     /* pthread mandelbrot set */
     for (size_t tid = 1; tid < ncpus; tid++) {
@@ -278,7 +269,8 @@ void* func(Data* data) {
             break;
 #ifdef VECTORIZATION
         int id;
-        for (id = task.start; id + 1 < task.end && id + 1 < height * width; id += 2) {
+        int id_end = min(task.end, height * width);
+        for (id = task.start; id < id_end - 1; id += 2) {
             __m128d vec_y0 = _mm_add_pd(_mm_mul_pd(_mm_set_pd((id + 1) / width, id / width), _mm_set1_pd((upper - lower) / height)), _mm_set1_pd(lower));
             __m128d vec_x0 = _mm_add_pd(_mm_mul_pd(_mm_set_pd((id + 1) % width, id % width), _mm_set1_pd((right - left) / width)), _mm_set1_pd(left));
             int repeats = 0;
@@ -303,7 +295,7 @@ void* func(Data* data) {
             image[id] = repeat_arr[0];
             image[id + 1] = repeat_arr[1];
         }
-        if (id < task.end && id < height * width) {
+        if (id < id_end) {
             int j = id / width;
             int i = id % width;
             double y0 = j * ((upper - lower) / height) + lower;
