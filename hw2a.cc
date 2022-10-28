@@ -12,8 +12,9 @@
  * 2: By column
  * 3: By block
  */
-#define PARTITION 0
+#define PARTITION 1
 #define VECTORIZATION
+// #undef VECTORIZATION
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -66,6 +67,14 @@ typedef struct Task {
 #elif PARTITION == 1
     int start;
     int end;
+#elif PARTITION == 2
+    int start;
+    int end;
+#elif PARTITION == 3
+    int start_i;
+    int start_j;
+    int end_i;
+    int end_j;
 #endif  // PARTITION
 } Task;
 typedef struct TaskPool {
@@ -75,6 +84,14 @@ typedef struct TaskPool {
 #elif PARTITION == 1
     int taskId;
     int chunk;
+#elif PARTITION == 2
+    int taskId;
+    int chunk;
+#elif PARTITION == 3
+    int task_i;
+    int task_j;
+    int chunk_i;
+    int chunk_j;
 #endif  // PARTITION
     pthread_mutex_t mutex;
 } TaskPool;
@@ -96,6 +113,9 @@ typedef struct Data {
     SharedData* sharedData;
     LocalData* localData;
 } Data;
+
+/* Utilities */
+int min(int x, int y);
 
 /* Gets taskid with locking */
 Task get_task(Data* data);
@@ -155,6 +175,14 @@ int main(int argc, char** argv) {
 #elif PARTITION == 1
     taskPool.taskId = 0;
     taskPool.chunk = 1;
+#elif PARTITION == 2
+    taskPool.taskId = 0;
+    taskPool.chunk = 1;
+#elif PARTITION == 3
+    taskPool.task_i = 0;
+    taskPool.task_j = 0;
+    taskPool.chunk_i = 50;
+    taskPool.chunk_j = 10;
 #endif  // PARTITION
 
     pthread_mutex_init(&taskPool.mutex, NULL);
@@ -193,6 +221,10 @@ int main(int argc, char** argv) {
     TOT_TIMING_END();
 }
 
+int min(int x, int y) {
+    return (x < y) ? x : y;
+}
+
 Task get_task(Data* data) {
     LocalData* localData = data->localData;
     SharedData* sharedData = data->sharedData;
@@ -208,6 +240,20 @@ Task get_task(Data* data) {
     task.start = taskPool->taskId;
     taskPool->taskId += taskPool->chunk;
     task.end = taskPool->taskId;
+#elif PARTITION == 2
+    task.start = taskPool->taskId;
+    taskPool->taskId += taskPool->chunk;
+    task.end = taskPool->taskId;
+#elif PARTITION == 3
+    task.start_i = taskPool->task_i;
+    task.start_j = taskPool->task_j;
+    task.end_i = min(task.start_i + taskPool->chunk_i, sharedData->width);
+    task.end_j = min(task.start_j + taskPool->chunk_j, sharedData->height);
+    taskPool->task_i += taskPool->chunk_i;
+    if (taskPool->task_i >= sharedData->width) {
+        taskPool->task_i = 0;
+        taskPool->task_j += taskPool->chunk_j;
+    }
 #endif  // PARTITION
     pthread_mutex_unlock(&taskPool->mutex);
     return task;
@@ -350,6 +396,148 @@ void* func(Data* data) {
             for (int i = 0; i < width; i++) {
                 double y0 = j * ((upper - lower) / height) + lower;
                 double x0 = i * ((right - left) / width) + left;
+                int repeats = 0;
+                double x = 0;
+                double y = 0;
+                double length_squared = 0;
+                while (repeats < iters && length_squared < 4) {
+                    double temp = x * x - y * y + x0;
+                    y = 2 * x * y + y0;
+                    x = temp;
+                    length_squared = x * x + y * y;
+                    ++repeats;
+                }
+                image[j * width + i] = repeats;
+            }
+        }
+#endif  // VECTORIZATION
+    }
+#elif PARTITION == 2
+    while (1) {
+        Task task = get_task(data);
+        if (task.start >= width)
+            break;
+#ifdef VECTORIZATION
+        for (int i = task.start, j; i < task.end && i < width; i++) {
+            for (j = 0; j + 1 < height; j += 2) {
+                __m128d vec_y0 = _mm_add_pd(_mm_mul_pd(_mm_set_pd(j + 1, j), _mm_set1_pd((upper - lower) / height)), _mm_set1_pd(lower));
+                __m128d vec_x0 = _mm_set1_pd(i * ((right - left) / width) + left);
+                int repeats = 0;
+                __m128i vec_repeat = _mm_setzero_si128();
+                __m128d vec_x = _mm_setzero_pd();
+                __m128d vec_y = _mm_setzero_pd();
+                __m128d vec_length_squared = _mm_setzero_pd();
+                __m128d vec_length_squared_threshold = _mm_set1_pd(4);
+                while (repeats < iters) {
+                    __m128d vec_cmp = _mm_cmpgt_pd(vec_length_squared_threshold, vec_length_squared);
+                    if (_mm_movemask_pd(vec_cmp) == 0)
+                        break;
+                    __m128d vec_temp = _mm_add_pd(_mm_sub_pd(_mm_mul_pd(vec_x, vec_x), _mm_mul_pd(vec_y, vec_y)), vec_x0);
+                    vec_y = _mm_add_pd(_mm_mul_pd(_mm_mul_pd(_mm_set1_pd(2), vec_x), vec_y), vec_y0);
+                    vec_x = vec_temp;
+                    vec_length_squared = _mm_blendv_pd(vec_length_squared, _mm_add_pd(_mm_mul_pd(vec_x, vec_x), _mm_mul_pd(vec_y, vec_y)), vec_cmp);
+                    vec_repeat = _mm_add_epi64(vec_repeat, _mm_srli_epi64(_mm_castpd_si128(vec_cmp), 63));
+                    ++repeats;
+                }
+                long long repeat_arr[2];
+                _mm_store_si128((__m128i*)repeat_arr, vec_repeat);
+                image[j * width + i] = repeat_arr[0];
+                image[(j + 1) * width + i] = repeat_arr[1];
+            }
+            if (j < height) {
+                double y0 = j * ((upper - lower) / height) + lower;
+                double x0 = i * ((right - left) / width) + left;
+                int repeats = 0;
+                double x = 0;
+                double y = 0;
+                double length_squared = 0;
+                while (repeats < iters && length_squared < 4) {
+                    double temp = x * x - y * y + x0;
+                    y = 2 * x * y + y0;
+                    x = temp;
+                    length_squared = x * x + y * y;
+                    ++repeats;
+                }
+                image[j * width + i] = repeats;
+            }
+        }
+#else
+        for (int i = task.start; i < task.end && i < width; i++) {
+            for (int j = 0; j < height; j++) {
+                double y0 = j * ((upper - lower) / height) + lower;
+                double x0 = i * ((right - left) / width) + left;
+                int repeats = 0;
+                double x = 0;
+                double y = 0;
+                double length_squared = 0;
+                while (repeats < iters && length_squared < 4) {
+                    double temp = x * x - y * y + x0;
+                    y = 2 * x * y + y0;
+                    x = temp;
+                    length_squared = x * x + y * y;
+                    ++repeats;
+                }
+                image[j * width + i] = repeats;
+            }
+        }
+#endif  // VECTORIZATION
+    }
+#elif PARTITION == 3
+    double coef_j = (upper - lower) / height;
+    double coef_i = (right - left) / width;
+    while (1) {
+        Task task = get_task(data);
+        if (task.start_j >= height)
+            break;
+#ifdef VECTORIZATION
+        for (int j = task.start_j, i; j < task.end_j; j++) {
+            for (i = task.start_i; i + 1 < task.end_i; i += 2) {
+                __m128d vec_y0 = _mm_set1_pd(j * ((upper - lower) / height) + lower);
+                __m128d vec_x0 = _mm_add_pd(_mm_mul_pd(_mm_set_pd(i + 1, i), _mm_set1_pd((right - left) / width)), _mm_set1_pd(left));
+                int repeats = 0;
+                __m128i vec_repeat = _mm_setzero_si128();
+                __m128d vec_x = _mm_setzero_pd();
+                __m128d vec_y = _mm_setzero_pd();
+                __m128d vec_length_squared = _mm_setzero_pd();
+                __m128d vec_length_squared_threshold = _mm_set1_pd(4);
+                while (repeats < iters) {
+                    __m128d vec_cmp = _mm_cmpgt_pd(vec_length_squared_threshold, vec_length_squared);
+                    if (_mm_movemask_pd(vec_cmp) == 0)
+                        break;
+                    __m128d vec_temp = _mm_add_pd(_mm_sub_pd(_mm_mul_pd(vec_x, vec_x), _mm_mul_pd(vec_y, vec_y)), vec_x0);
+                    vec_y = _mm_add_pd(_mm_mul_pd(_mm_mul_pd(_mm_set1_pd(2), vec_x), vec_y), vec_y0);
+                    vec_x = vec_temp;
+                    vec_length_squared = _mm_blendv_pd(vec_length_squared, _mm_add_pd(_mm_mul_pd(vec_x, vec_x), _mm_mul_pd(vec_y, vec_y)), vec_cmp);
+                    vec_repeat = _mm_add_epi64(vec_repeat, _mm_srli_epi64(_mm_castpd_si128(vec_cmp), 63));
+                    ++repeats;
+                }
+                long long repeat_arr[2];
+                _mm_store_si128((__m128i*)repeat_arr, vec_repeat);
+                image[j * width + i] = repeat_arr[0];
+                image[j * width + i + 1] = repeat_arr[1];
+            }
+            if (i < task.end_i) {
+                double y0 = j * coef_j + lower;
+                double x0 = i * coef_i + left;
+                int repeats = 0;
+                double x = 0;
+                double y = 0;
+                double length_squared = 0;
+                while (repeats < iters && length_squared < 4) {
+                    double temp = x * x - y * y + x0;
+                    y = 2 * x * y + y0;
+                    x = temp;
+                    length_squared = x * x + y * y;
+                    ++repeats;
+                }
+                image[j * width + i] = repeats;
+            }
+        }
+#else
+        for (int j = task.start_j; j < task.end_j; j++) {
+            for (int i = task.start_i; i < task.end_i; i++) {
+                double y0 = j * coef_j + lower;
+                double x0 = i * coef_i + left;
                 int repeats = 0;
                 double x = 0;
                 double y = 0;
