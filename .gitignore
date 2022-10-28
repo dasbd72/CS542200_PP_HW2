@@ -1,0 +1,10 @@
+# Folders
+.vscode
+scripts
+outputs
+old
+
+# Executable
+hw2seq
+hw2a
+hw2b
