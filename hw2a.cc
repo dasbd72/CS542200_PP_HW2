@@ -13,7 +13,7 @@
  */
 #define PARTITION 1
 #define VECTORIZATION
-// #undef VECTORIZATION
+#undef VECTORIZATION
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -40,17 +40,34 @@
 
 #ifdef TIMING
 #include <time.h>
-clock_t __start_time, __tot_start_time;
+struct timespec __start, __end, __temp;
+struct timespec __tot_start, __tot_end, __tot_temp;
 double __duration, __tot_duration;
 #define TIMING_START() \
-    __start_time = clock();
-#define TIMING_END(arg)                                             \
-    __duration = (double)(clock() - __start_time) / CLOCKS_PER_SEC; \
+    clock_gettime(CLOCK_MONOTONIC, &__start);
+#define TIMING_END(arg)                                                 \
+    clock_gettime(CLOCK_MONOTONIC, &__end);                             \
+    if ((__end.tv_nsec - __start.tv_nsec) < 0) {                        \
+        __temp.tv_sec = __end.tv_sec - __start.tv_sec - 1;              \
+        __temp.tv_nsec = 1000000000 + __end.tv_nsec - __start.tv_nsec;  \
+    } else {                                                            \
+        __temp.tv_sec = __end.tv_sec - __start.tv_sec;                  \
+        __temp.tv_nsec = __end.tv_nsec - __start.tv_nsec;               \
+    }                                                                   \
+    __duration = __temp.tv_sec + (double)__temp.tv_nsec / 1000000000.0; \
     DEBUG_PRINT("%s, %lf\n", arg, __duration);
 #define TOT_TIMING_START() \
-    __tot_start_time = clock();
-#define TOT_TIMING_END()                                                    \
-    __tot_duration = (double)(clock() - __tot_start_time) / CLOCKS_PER_SEC; \
+    clock_gettime(CLOCK_MONOTONIC, &__tot_start);
+#define TOT_TIMING_END()                                                            \
+    clock_gettime(CLOCK_MONOTONIC, &__tot_end);                                     \
+    if ((__tot_end.tv_nsec - __tot_start.tv_nsec) < 0) {                            \
+        __tot_temp.tv_sec = __tot_end.tv_sec - __tot_start.tv_sec - 1;              \
+        __tot_temp.tv_nsec = 1000000000 + __tot_end.tv_nsec - __tot_start.tv_nsec;  \
+    } else {                                                                        \
+        __tot_temp.tv_sec = __tot_end.tv_sec - __tot_start.tv_sec;                  \
+        __tot_temp.tv_nsec = __tot_end.tv_nsec - __tot_start.tv_nsec;               \
+    }                                                                               \
+    __tot_duration = __tot_temp.tv_sec + (double)__tot_temp.tv_nsec / 1000000000.0; \
     DEBUG_PRINT("Total, %lf\n", __tot_duration);
 #else
 #define TIMING_START()
@@ -201,7 +218,7 @@ int main(int argc, char** argv) {
     }
 
     /* draw and cleanup */
-    TIMING_START()
+    TIMING_START();
     write_png(filename, iters, width, height, image);
     TIMING_END("write_png");
     free(image);
@@ -348,7 +365,8 @@ void* func(Data* data) {
         if (task.start >= height)
             break;
 #ifdef VECTORIZATION
-        for (int j = task.start, i; j < task.end && j < height; j++) {
+        int j, i;
+        for (j = task.start; j < task.end && j < height; j++) {
             for (i = 0; i + 1 < width; i += 2) {
                 __m128d vec_y0 = _mm_add_pd(_mm_mul_pd(_mm_set1_pd(j), vec_ulh), vec_lower);
                 __m128d vec_x0 = _mm_add_pd(_mm_mul_pd(_mm_set_pd(i + 1, i), vec_rlw), vec_left);
@@ -417,7 +435,8 @@ void* func(Data* data) {
         if (task.start >= width)
             break;
 #ifdef VECTORIZATION
-        for (int i = task.start, j; i < task.end && i < width; i++) {
+        int j, i;
+        for (i = task.start; i < task.end && i < width; i++) {
             for (j = 0; j + 1 < height; j += 2) {
                 __m128d vec_y0 = _mm_add_pd(_mm_mul_pd(_mm_set_pd(j + 1, j), vec_ulh), vec_lower);
                 __m128d vec_x0 = _mm_add_pd(_mm_mul_pd(_mm_set1_pd(i), vec_rlw), vec_left);
@@ -488,7 +507,8 @@ void* func(Data* data) {
         if (task.start_j >= height)
             break;
 #ifdef VECTORIZATION
-        for (int j = task.start_j, i; j < task.end_j; j++) {
+        int j, i;
+        for (j = task.start_j; j < task.end_j; j++) {
             for (i = task.start_i; i + 1 < task.end_i; i += 2) {
                 __m128d vec_y0 = _mm_add_pd(_mm_mul_pd(_mm_set1_pd(j), vec_ulh), vec_lower);
                 __m128d vec_x0 = _mm_add_pd(_mm_mul_pd(_mm_set_pd(i + 1, i), vec_rlw), vec_left);
