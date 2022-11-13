@@ -249,6 +249,15 @@ void* worker(Data* data) {
     int* image = sharedData->image;
     size_t ncpus = sharedData->ncpus;
 
+#ifdef VECTORIZATION
+    __m128d vec_d_4 = _mm_set1_pd(4);
+    __m128d vec_d_2 = _mm_set1_pd(2);
+    __m128d vec_ulh = _mm_set1_pd((upper - lower) / height);
+    __m128d vec_rlw = _mm_set1_pd((right - left) / width);
+    __m128d vec_lower = _mm_set1_pd(lower);
+    __m128d vec_left = _mm_set1_pd(left);
+#endif  // VECTORIZATION
+
     while (1) {
         Task task = get_task(data);
         if (task.start >= height)
@@ -261,29 +270,27 @@ void* worker(Data* data) {
             for (i = 0; i < width; i += 2) {
                 j = j_shift + task.start;
                 if (i + 1 < width) {
-                    __m128d vec_y0 = _mm_set1_pd(j * ((upper - lower) / height) + lower);
-                    __m128d vec_x0 = _mm_add_pd(_mm_mul_pd(_mm_set_pd(i + 1, i), _mm_set1_pd((right - left) / width)), _mm_set1_pd(left));
+                    __m128d vec_y0 = _mm_add_pd(_mm_mul_pd(_mm_set1_pd(j), vec_ulh), vec_lower);
+                    __m128d vec_x0 = _mm_add_pd(_mm_mul_pd(_mm_set_pd(i + 1, i), vec_rlw), vec_left);
                     int repeats = 0;
                     __m128i vec_repeat = _mm_setzero_si128();
-                    __m128d vec_x = _mm_setzero_pd();
-                    __m128d vec_y = _mm_setzero_pd();
+                    __m128d vec_x = _mm_setzero_pd(), vec_x_sq = _mm_setzero_pd();
+                    __m128d vec_y = _mm_setzero_pd(), vec_y_sq = _mm_setzero_pd();
                     __m128d vec_length_squared = _mm_setzero_pd();
-                    __m128d vec_length_squared_threshold = _mm_set1_pd(4);
                     while (repeats < iters) {
-                        __m128d vec_cmp = _mm_cmpgt_pd(vec_length_squared_threshold, vec_length_squared);
+                        __m128d vec_cmp = _mm_cmpgt_pd(vec_d_4, vec_length_squared);
                         if (_mm_movemask_pd(vec_cmp) == 0)
                             break;
-                        __m128d vec_temp = _mm_add_pd(_mm_sub_pd(_mm_mul_pd(vec_x, vec_x), _mm_mul_pd(vec_y, vec_y)), vec_x0);
-                        vec_y = _mm_add_pd(_mm_mul_pd(_mm_mul_pd(_mm_set1_pd(2), vec_x), vec_y), vec_y0);
+                        __m128d vec_temp = _mm_add_pd(_mm_sub_pd(vec_x_sq, vec_y_sq), vec_x0);
+                        vec_y = _mm_add_pd(_mm_mul_pd(_mm_mul_pd(vec_d_2, vec_x), vec_y), vec_y0);
                         vec_x = vec_temp;
-                        vec_length_squared = _mm_blendv_pd(vec_length_squared, _mm_add_pd(_mm_mul_pd(vec_x, vec_x), _mm_mul_pd(vec_y, vec_y)), vec_cmp);
+                        vec_x_sq = _mm_mul_pd(vec_x, vec_x);
+                        vec_y_sq = _mm_mul_pd(vec_y, vec_y);
+                        vec_length_squared = _mm_blendv_pd(vec_length_squared, _mm_add_pd(vec_x_sq, vec_y_sq), vec_cmp);
                         vec_repeat = _mm_add_epi64(vec_repeat, _mm_srli_epi64(_mm_castpd_si128(vec_cmp), 63));
                         ++repeats;
                     }
-                    long long repeat_arr[2];
-                    _mm_store_si128((__m128i*)repeat_arr, vec_repeat);
-                    image[j * width + i] = repeat_arr[0];
-                    image[j * width + i + 1] = repeat_arr[1];
+                    _mm_storel_epi64((__m128i*)(image + j * width + i), _mm_shuffle_epi32(vec_repeat, 0b01000));
                 } else {
                     double y0 = j * ((upper - lower) / height) + lower;
                     double x0 = i * ((right - left) / width) + left;
@@ -355,6 +362,7 @@ void write_png(const char* filename, int iters, int width, int height, const int
     png_bytep row = (png_bytep)malloc(row_size);
     for (int y = 0; y < height; ++y) {
         memset(row, 0, row_size);
+#pragma omp parallel for default(shared)
         for (int x = 0; x < width; ++x) {
             int p = buffer[(height - 1 - y) * width + x];
             png_bytep color = row + x * 3;
