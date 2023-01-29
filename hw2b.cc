@@ -1,5 +1,10 @@
 // #define DEBUG
 // #define TIMING
+/**
+ * 0: By index
+ * 1: By row
+ */
+#define PARTITION 0
 #define VECTORIZATION
 // #undef VECTORIZATION
 
@@ -53,11 +58,11 @@ double __tot_start_time, __tot_duration, __sum_tot_duration, __max_tot_duration,
     __tot_start_time = MPI_Wtime();
 #define TOT_TIMING_END()                                                                                                \
     __tot_duration = MPI_Wtime() - __tot_start_time;                                                                    \
-    MPI_Reduce(&__tot_duration, &__tot_sum_duration, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);                        \
-    MPI_Reduce(&__tot_duration, &__tot_max_duration, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);                        \
-    MPI_Reduce(&__tot_duration, &__tot_min_duration, 1, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);                        \
+    MPI_Reduce(&__tot_duration, &__sum_tot_duration, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);                        \
+    MPI_Reduce(&__tot_duration, &__max_tot_duration, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);                        \
+    MPI_Reduce(&__tot_duration, &__min_tot_duration, 1, MPI_DOUBLE, MPI_MIN, 0, MPI_COMM_WORLD);                        \
     if (world_rank == 0) {                                                                                              \
-        DEBUG_PRINT("Total, %lf, %lf, %lf\n", __tot_sum_duration / world_size, __tot_max_duration, __tot_min_duration); \
+        DEBUG_PRINT("Total, %lf, %lf, %lf\n", __sum_tot_duration / world_size, __max_tot_duration, __min_tot_duration); \
     }
 #else
 #define TIMING_START()
@@ -67,12 +72,22 @@ double __tot_start_time, __tot_duration, __sum_tot_duration, __max_tot_duration,
 #endif
 
 typedef struct Task {
+#if PARTITION == 0
     int start;
     int end;
+#elif PARTITION == 1
+    int start;
+    int end;
+#endif  // PARTITION
 } Task;
 typedef struct TaskPool {
+#if PARTITION == 0
     int taskId;
     int chunk;
+#elif PARTITION == 1
+    int taskId;
+    int chunk;
+#endif  // PARTITION
     pthread_mutex_t mutex;
 } TaskPool;
 typedef struct SharedData {
@@ -98,6 +113,7 @@ typedef struct Data {
 
 /* Utilities */
 int min(int x, int y);
+int max(int x, int y);
 
 /* Gets taskid with locking */
 Task get_task(Data* data);
@@ -119,6 +135,8 @@ int main(int argc, char** argv) {
     MPI_EXECUTE(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank));
     MPI_EXECUTE(MPI_Comm_size(MPI_COMM_WORLD, &world_size));
 
+    TOT_TIMING_START();
+    TIMING_START();
     /* detect how many CPUs are available */
     cpu_set_t cpu_set;
     sched_getaffinity(0, sizeof(cpu_set), &cpu_set);
@@ -160,18 +178,25 @@ int main(int argc, char** argv) {
     sharedData.world_rank = world_rank;
     sharedData.ncpus = CPU_COUNT(&cpu_set);
 
+#if PARTITION == 0
+    taskPool.taskId = 0;
+    taskPool.chunk = width * sharedData.ncpus;
+#elif PARTITION == 1
     taskPool.taskId = 0;
     taskPool.chunk = sharedData.ncpus;
+#endif  // PARTITION
 
     data.sharedData = &sharedData;
 
+    TIMING_END("Initialize");
+    TIMING_START();
     if (world_size > 1 && world_rank == 0) {
         sharedData.ncpus--;
         pthread_mutex_init(&taskPool.mutex, NULL);
         pthread_create(&thread, NULL, thread_controller, &data);
     }
 
-    if (sharedData.ncpus) {
+    if (world_rank < world_size && sharedData.ncpus) {
         worker(&data);
     }
 
@@ -179,13 +204,24 @@ int main(int argc, char** argv) {
         pthread_join(thread, NULL);
         pthread_mutex_destroy(&taskPool.mutex);
     }
+    TIMING_END("Mandlebrot");
 
+    TIMING_START();
     MPI_Reduce(image, tot_image, width * height, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    TIMING_END("Reduce");
 
     /* draw */
     if (world_rank == 0) {
+#ifdef TIMING
+        double wp_stime = MPI_Wtime();
+#endif
         write_png(filename, iters, width, height, tot_image);
+#ifdef TIMING
+        double wp_duration = MPI_Wtime() - wp_stime;
+        DEBUG_PRINT("write_png: %lf\n", wp_duration);
+#endif
     }
+    TOT_TIMING_END();
 
     free(tot_image);
     free(image);
@@ -195,6 +231,9 @@ int main(int argc, char** argv) {
 int min(int x, int y) {
     return (x < y) ? x : y;
 }
+int max(int x, int y) {
+    return (x > y) ? x : y;
+}
 
 Task get_task(Data* data) {
     SharedData* sharedData = data->sharedData;
@@ -203,9 +242,15 @@ Task get_task(Data* data) {
     Task task;
     if (sharedData->world_rank == 0) {
         pthread_mutex_lock(&taskPool->mutex);
+#if PARTITION == 0
         task.start = taskPool->taskId;
         taskPool->taskId += taskPool->chunk;
         task.end = taskPool->taskId;
+#elif PARTITION == 1
+        task.start = taskPool->taskId;
+        taskPool->taskId += taskPool->chunk;
+        task.end = taskPool->taskId;
+#endif  // PARTITION
         pthread_mutex_unlock(&taskPool->mutex);
     } else {
         pthread_mutex_lock(&taskPool->mutex);
@@ -221,10 +266,21 @@ void* controller(Data* data) {
     assert(sharedData->world_rank == 0);
 
     MPI_Status status;
+    MPI_Request request;
     Task task;
     int done_cnt = 0;
     while (done_cnt < sharedData->world_size - 1) {
         MPI_Recv(NULL, 0, MPI_CHAR, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &status);
+
+#if PARTITION == 0
+        if (taskPool->taskId >= sharedData->height * sharedData->width)
+            done_cnt++;
+        pthread_mutex_lock(&taskPool->mutex);
+        task.start = taskPool->taskId;
+        taskPool->taskId += taskPool->chunk;
+        task.end = taskPool->taskId;
+        pthread_mutex_unlock(&taskPool->mutex);
+#elif PARTITION == 1
         if (taskPool->taskId >= sharedData->height)
             done_cnt++;
         pthread_mutex_lock(&taskPool->mutex);
@@ -232,7 +288,8 @@ void* controller(Data* data) {
         taskPool->taskId += taskPool->chunk;
         task.end = taskPool->taskId;
         pthread_mutex_unlock(&taskPool->mutex);
-        MPI_Send(&task, sizeof(Task) / sizeof(int), MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
+#endif  // PARTITION
+        MPI_Isend(&task, sizeof(Task) / sizeof(int), MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD, &request);
     }
     return NULL;
 }
@@ -258,6 +315,85 @@ void* worker(Data* data) {
     __m128d vec_left = _mm_set1_pd(left);
 #endif  // VECTORIZATION
 
+#if PARTITION == 0
+    while (1) {
+        Task task = get_task(data);
+        if (task.start >= height * width)
+            break;
+        int id, id_offset;
+        int id_end = min(task.end, height * width);
+        int id_offset_end = id_end - task.start;
+#ifdef VECTORIZATION
+#pragma omp parallel for num_threads(ncpus) schedule(dynamic) default(shared)
+        for (id_offset = 0; id_offset < id_offset_end; id_offset += 2) {
+            id = task.start + id_offset;
+            if (id + 1 < id_end) {
+                __m128d vec_y0 = _mm_add_pd(_mm_mul_pd(_mm_set_pd((id + 1) / width, id / width), vec_ulh), vec_lower);
+                __m128d vec_x0 = _mm_add_pd(_mm_mul_pd(_mm_set_pd((id + 1) % width, id % width), vec_rlw), vec_left);
+                int repeats = 0;
+                __m128i vec_repeat = _mm_setzero_si128();
+                __m128d vec_x = _mm_setzero_pd(), vec_x_sq = _mm_setzero_pd();
+                __m128d vec_y = _mm_setzero_pd(), vec_y_sq = _mm_setzero_pd();
+                __m128d vec_length_squared = _mm_setzero_pd();
+                while (repeats < iters) {
+                    __m128d vec_cmp = _mm_cmpgt_pd(vec_d_4, vec_length_squared);
+                    if (_mm_movemask_pd(vec_cmp) == 0)
+                        break;
+                    __m128d vec_temp = _mm_add_pd(_mm_sub_pd(vec_x_sq, vec_y_sq), vec_x0);
+                    vec_y = _mm_add_pd(_mm_mul_pd(_mm_mul_pd(vec_d_2, vec_x), vec_y), vec_y0);
+                    vec_x = vec_temp;
+                    vec_x_sq = _mm_mul_pd(vec_x, vec_x);
+                    vec_y_sq = _mm_mul_pd(vec_y, vec_y);
+                    vec_length_squared = _mm_blendv_pd(vec_length_squared, _mm_add_pd(vec_x_sq, vec_y_sq), vec_cmp);
+                    vec_repeat = _mm_add_epi64(vec_repeat, _mm_srli_epi64(_mm_castpd_si128(vec_cmp), 63));
+                    ++repeats;
+                }
+                _mm_storel_epi64((__m128i*)(image + id), _mm_shuffle_epi32(vec_repeat, 0b01000));
+            } else {
+                int j = id / width;
+                int i = id % width;
+                double y0 = j * ((upper - lower) / height) + lower;
+                double x0 = i * ((right - left) / width) + left;
+                int repeats = 0;
+                double x = 0;
+                double y = 0;
+                double length_squared = 0;
+                while (repeats < iters && length_squared < 4) {
+                    double temp = x * x - y * y + x0;
+                    y = 2 * x * y + y0;
+                    x = temp;
+                    length_squared = x * x + y * y;
+                    ++repeats;
+                }
+                image[id] = repeats;
+            }
+        }
+#else
+#pragma omp parallel for num_threads(ncpus) schedule(dynamic) default(shared)
+        for (id_offset = 0; id_offset < id_offset_end; id_offset++) {
+            id = task.start + id_offset;
+            int j = id / width;
+            int i = id % width;
+            double y0 = j * ((upper - lower) / height) + lower;
+            double x0 = i * ((right - left) / width) + left;
+            int repeats = 0;
+            double x = 0, x_sq = 0;
+            double y = 0, y_sq = 0;
+            double length_squared = 0;
+            while (repeats < iters && length_squared < 4) {
+                double temp = x_sq - y_sq + x0;
+                y = 2 * x * y + y0;
+                x = temp;
+                x_sq = x * x;
+                y_sq = y * y;
+                length_squared = x_sq + y_sq;
+                ++repeats;
+            }
+            image[j * width + i] = repeats;
+        }
+#endif  // VECTORIZATION
+    }
+#elif PARTITION == 1
     while (1) {
         Task task = get_task(data);
         if (task.start >= height)
@@ -265,7 +401,7 @@ void* worker(Data* data) {
         int j_shift_end = min(task.end, height) - task.start;
         int j_shift, j, i;
 #ifdef VECTORIZATION
-#pragma omp parallel for num_threads(ncpus) default(shared) collapse(2)
+#pragma omp parallel for num_threads(ncpus) schedule(dynamic) default(shared) collapse(2)
         for (j_shift = 0; j_shift < j_shift_end; j_shift++) {
             for (i = 0; i < width; i += 2) {
                 j = j_shift + task.start;
@@ -310,7 +446,7 @@ void* worker(Data* data) {
             }
         }
 #else
-#pragma omp parallel for num_threads(ncpus) default(shared) collapse(2)
+#pragma omp parallel for num_threads(ncpus) schedule(dynamic) default(shared) collapse(2)
         for (j_shift = 0; j_shift < j_shift_end; j_shift++) {
             for (i = 0; i < width; i += 2) {
                 j = j_shift + task.start;
@@ -332,6 +468,7 @@ void* worker(Data* data) {
         }
 #endif  // VECTORIZATION
     }
+#endif  // PARTITION
     return NULL;
 }
 void* thread_controller(void* arg) {
@@ -362,7 +499,7 @@ void write_png(const char* filename, int iters, int width, int height, const int
     png_bytep row = (png_bytep)malloc(row_size);
     for (int y = 0; y < height; ++y) {
         memset(row, 0, row_size);
-#pragma omp parallel for default(shared)
+#pragma omp parallel for schedule(dynamic) default(shared)
         for (int x = 0; x < width; ++x) {
             int p = buffer[(height - 1 - y) * width + x];
             png_bytep color = row + x * 3;

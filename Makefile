@@ -1,13 +1,15 @@
-CC = gcc
-CXX = g++
+# CC = gcc
+# CXX = g++
+CC = clang
+CXX = clang++
 LDLIBS = -lpng
 CFLAGS = -lm -O3
 CFLAGS += -Wall -Wextra
 CFLAGS += -march=native
-hw2a: CFLAGS += -pthread
-hw2b: CC = mpicc
-hw2b: CXX = mpicxx
-hw2b: CFLAGS += -fopenmp -pthread
+hw2a: CFLAGS += -pthread -Ofast
+hw2b: CC := mpicc -cc=$(CC)
+hw2b: CXX := mpicxx -cxx=$(CXX)
+hw2b: CFLAGS += -fopenmp -pthread -Ofast
 CXXFLAGS = -std=c++17 $(CFLAGS)
 TARGETS = hw2seq hw2a hw2b
 

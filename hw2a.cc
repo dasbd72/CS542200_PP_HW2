@@ -185,7 +185,7 @@ int main(int argc, char** argv) {
 #if SCHEDULE == 0
     taskPool.chunk = ceil((double)(width * height) / ncpus);
 #elif SCHEDULE == 1
-    taskPool.chunk = width;
+    taskPool.chunk = 1024;
 #endif  // SCHEDULE
 #elif PARTITION == 1
     taskPool.taskId = 0;
@@ -278,6 +278,8 @@ void* func(Data* data) {
     int width = sharedData->width;
     int height = sharedData->height;
     int* image = sharedData->image;
+    double ulh = (upper - lower) / height;
+    double rlw = (right - left) / width;
 
 #ifdef TIMING
     struct timespec thread_start, thread_end, thread_temp;
@@ -290,8 +292,8 @@ void* func(Data* data) {
 #ifdef VECTORIZATION
     __m128d vec_d_4 = _mm_set1_pd(4);
     __m128d vec_d_2 = _mm_set1_pd(2);
-    __m128d vec_ulh = _mm_set1_pd((upper - lower) / height);
-    __m128d vec_rlw = _mm_set1_pd((right - left) / width);
+    __m128d vec_ulh = _mm_set1_pd(ulh);
+    __m128d vec_rlw = _mm_set1_pd(rlw);
     __m128d vec_lower = _mm_set1_pd(lower);
     __m128d vec_left = _mm_set1_pd(left);
 #endif  // VECTORIZATION
@@ -344,8 +346,8 @@ void* func(Data* data) {
         if (id < id_end) {
             int j = id / width;
             int i = id % width;
-            double y0 = j * ((upper - lower) / height) + lower;
-            double x0 = i * ((right - left) / width) + left;
+            double y0 = j * ulh + lower;
+            double x0 = i * rlw + left;
             int repeats = 0;
             double x = 0;
             double y = 0;
